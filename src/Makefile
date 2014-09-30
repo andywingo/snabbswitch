@@ -1,8 +1,8 @@
 Q= @
 E= @echo
 # For verbose command line output, uncomment these lines:
-#Q=
-#E= @:
+Q=
+E= @:
 
 TEST_SKIPPED="43"
 
@@ -10,12 +10,15 @@ SRCDIR = $(shell find . -type d -not -regex './obj.*' -printf '%P ')
 OBJDIR = $(patsubst %,obj/%,$(SRCDIR))
 
 LUASRC = $(shell find . -regex '[^\#]*\.lua' -printf '%P ')
+PFLUASRC = $(shell cd ../deps/pflua && \
+	         find . -regex '[^\#]*\.lua' -printf '%P ')
 CSRC   = $(shell find . -regex '[^\#]*\.c'   -printf '%P ')
 CHDR   = $(shell find . -regex '[^\#]*\.h'   -printf '%P ')
 ASM    = $(shell find . -regex '[^\#]*\.dasc' -printf '%P ')
 RMSRC  = $(shell find . -name  README.md.src -printf '%P ')
 
 LUAOBJ := $(patsubst %.lua,obj/%_lua.o,$(LUASRC))
+PFLUAOBJ := $(patsubst %.lua,obj/%_lua.o,$(PFLUASRC))
 COBJ   := $(patsubst %.c,obj/%_c.o,    $(CSRC))
 HOBJ   := $(patsubst %.h,obj/%_h.o,    $(CHDR))
 ASMOBJ := $(patsubst %.dasc,obj/%_dasc.o,   $(ASM))
@@ -42,7 +45,7 @@ all: snabb
 
 markdown: $(RMOBJS)
 
-snabb: $(LUAOBJ) $(HOBJ) $(COBJ) $(ASMOBJ)
+snabb: $(LUAOBJ) $(PFLUAOBJ) $(HOBJ) $(COBJ) $(ASMOBJ)
 	$(E) "LINK      $@"
 	$(Q) gcc -Wl,--no-as-needed -Wl,-E -Werror -Wall -o $@ $^ \
 	    ../deps/luajit/src/libluajit.a \
@@ -96,6 +99,11 @@ $(OBJDIR) testlog:
 
 $(LUAOBJ): obj/%_lua.o: %.lua Makefile | $(OBJDIR)
 	$(E) "LUA       $@"
+	$(Q) luajit -bg -n $(subst /,.,$*) $< $@
+
+$(PFLUAOBJ): obj/%_lua.o: ../deps/pflua/%.lua Makefile
+	$(E) "LUA       $@"
+	$(Q) mkdir -p $(dir $@)
 	$(Q) luajit -bg -n $(subst /,.,$*) $< $@
 
 $(COBJ): obj/%_c.o: %.c $(CHDR) Makefile | $(OBJDIR)
