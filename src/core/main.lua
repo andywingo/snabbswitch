@@ -39,7 +39,7 @@ Available options are:
 
 debug_on_error = false
 profiling = false
-pflua = false
+pflua = true
 
 -- List of parameters passed on the command line.
 parameters = {}
