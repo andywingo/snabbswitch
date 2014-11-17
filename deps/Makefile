@@ -1,3 +1,5 @@
+SHELL:=/bin/bash
+
 all:
 	@echo "Available targets: update-pflua" && false
 
