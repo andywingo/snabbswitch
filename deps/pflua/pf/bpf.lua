@@ -4,7 +4,10 @@ local ffi = require("ffi")
 local bit = require("bit")
 local band = bit.band
 
-verbose = os.getenv("PF_VERBOSE");
+_G.runtime_u32, _G.runtime_add, _G.runtime_sub, _G.runtime_mul,
+_G.runtime_div = nil
+
+local verbose = os.getenv("PF_VERBOSE");
 
 local function BPF_CLASS(code) return band(code, 0x07) end
 local BPF_LD   = 0x00
@@ -247,7 +250,7 @@ function compile_lua(bpf)
          assert(src == BPF_K, "division by non-constant value is unsupported")
          assert(k ~= 0, "program contains division by constant zero")
          local bits = is_power_of_2(k)
-         if bits then rhs = shr(A(), bits) else rhs = div(A(), k) end
+         if bits then rhs = rsh(A(), bits) else rhs = div(A(), k) end
       elseif op == BPF_OR  then rhs = bor(A(), b)
       elseif op == BPF_AND then rhs = band(A(), b)
       elseif op == BPF_LSH then rhs = lsh(A(), b)

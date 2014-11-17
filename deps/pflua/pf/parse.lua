@@ -20,7 +20,8 @@ end
 
 local punctuation = set(
    '(', ')', '[', ']', '!', '!=', '<', '<=', '>', '>=', '=',
-   '+', '-', '*', '/', '&', '|', '^', '&&', '||', '<<', '>>'
+   '+', '-', '*', '/', '&', '|', '^', '&&', '||', '<<', '>>',
+   '\\'
 )
 
 local function lex_host_or_keyword(str, pos)
@@ -104,21 +105,16 @@ local function lex_ipv6(str, pos)
 end
 
 local function lex_ehost(str, pos)
-   local function normalize(digits)
-      local result = tonumber(digits, 16)
-      if (result < 16) then result = result * 2^4 end
-      return result
-   end
    local start = pos
    local addr = { 'ehost' }
    local digits, dot = str:match("^(%x%x?)()%:", pos)
    assert(digits, "failed to parse ethernet host address at "..pos)
-   table.insert(addr, normalize(digits))
+   table.insert(addr, tonumber(digits, 16))
    pos = dot
    for i=1,5 do
       local digits, dot = str:match("^%:(%x%x?)()", pos)
       assert(digits, "failed to parse ethernet host address at "..pos)
-      table.insert(addr, normalize(digits))
+      table.insert(addr, tonumber(digits, 16))
       pos = dot
    end
    local terminators = " \t\r\n)/"
@@ -410,29 +406,40 @@ local function table_parser(table, default)
    end
 end
 
+local ip_protos = set(
+   'icmp', 'icmp6', 'igmp', 'igrp', 'pim', 'ah', 'esp', 'vrrp', 'udp', 'tcp', 'sctp'
+)
+
+local function parse_proto_arg(lexer, proto_type, protos)
+   lexer.check('\\')
+   local arg = lexer.next()
+   if not proto_type then proto_type = 'ip' end
+   if not protos then protos = ip_protos end
+   if type(arg) == 'number' then return arg end
+   if type(arg) == 'string' then
+      local proto = arg:match("^(%w+)")
+      if protos[proto] then return proto end
+   end
+   lexer.error('invalid %s proto %s', proto_type, arg)
+end
+
 local ether_protos = set(
    'ip', 'ip6', 'arp', 'rarp', 'atalk', 'aarp', 'decnet', 'sca', 'lat',
    'mopdl', 'moprc', 'iso', 'stp', 'ipx', 'netbeui'
 )
 
 local function parse_ether_proto_arg(lexer)
-   local arg = lexer.next()
-   if type(arg) == 'number' or ether_protos[arg] then
-      return arg
-   end
-   lexer.error('invalid ethernet proto %s', arg)
+   return parse_proto_arg(lexer, 'ethernet', ether_protos)
 end
 
-local ip_protos = set(
-   'icmp', 'icmp6', 'igmp', 'igrp', 'pim', 'ah', 'esp', 'vrrp', 'udp', 'tcp'
-)
-
 local function parse_ip_proto_arg(lexer)
-   local arg = lexer.next()
-   if type(arg) == 'number' or ip_protos[arg] then
-      return arg
-   end
-   lexer.error('invalid ip proto %s', arg)
+   return parse_proto_arg(lexer, 'ip', ip_protos)
+end
+
+local iso_protos = set('clnp', 'esis', 'isis')
+
+local function parse_iso_proto_arg(lexer)
+   return parse_proto_arg(lexer, 'iso', iso_protos)
 end
 
 local function simple_typed_arg_parser(expected)
@@ -491,8 +498,6 @@ local wlan_frame_data_subtypes = set(
 
 local wlan_directions = set('nods', 'tods', 'fromds', 'dstods')
 
-local iso_proto_types = set('clnp', 'esis', 'isis')
-
 local function parse_enum_arg(lexer, set)
    local arg = lexer.next()
    assert(set[arg], 'invalid argument: '..arg)
@@ -533,9 +538,9 @@ end
 
 local function parse_optional_int(lexer, tok)
    if (type(lexer.peek()) == 'number') then
-      return parser(tok, lexer.next())
+      return { tok, lexer.next() }
    end
-   return parser(tok)
+   return { tok }
 end
 
 local src_or_dst_types = {
@@ -563,20 +568,25 @@ local ip_types = {
    src = table_parser(src_or_dst_types, unary(parse_host_arg)),
    host = unary(parse_host_arg),
    proto = unary(parse_ip_proto_arg),
-   protochain = unary(parse_proto_arg),
+   protochain = unary(parse_ip_proto_arg),
    broadcast = nullary(),
    multicast = nullary(),
 }
 
 local ip6_types = {
    proto = unary(parse_ip_proto_arg),
-   protochain = unary(parse_proto_arg),
+   protochain = unary(parse_ip_proto_arg),
+   broadcast = nullary(),
    multicast = nullary(),
 }
 
+local decnet_host_type = {
+   host = unary(parse_decnet_host_arg),
+}
+
 local decnet_types = {
-   src = unary(parse_decnet_host_arg),
-   dst = unary(parse_decnet_host_arg),
+   src = table_parser(decnet_host_type, unary(parse_decnet_host_arg)),
+   dst = table_parser(decnet_host_type, unary(parse_decnet_host_arg)),
    host = unary(parse_decnet_host_arg),
 }
 
@@ -587,10 +597,18 @@ local wlan_types = {
    addr2 = unary(parse_ehost_arg),
    addr3 = unary(parse_ehost_arg),
    addr4 = unary(parse_ehost_arg),
+
+   -- As an alias of 'ether'
+   dst = table_parser(ether_host_type, unary(parse_ehost_arg)),
+   src = table_parser(ether_host_type, unary(parse_ehost_arg)),
+   host = unary(parse_ehost_arg),
+   broadcast = nullary(),
+   multicast = nullary(),
+   proto = unary(parse_ether_proto_arg),
 }
 
 local iso_types = {
-   proto = unary(enum_arg_parser(iso_proto_types)),
+   proto = unary(parse_iso_proto_arg),
    ta = unary(parse_ehost_arg),
    addr1 = unary(parse_ehost_arg),
    addr2 = unary(parse_ehost_arg),
@@ -615,81 +633,6 @@ local rarp_types = {
    dst = table_parser(src_or_dst_types, unary(parse_host_arg)),
    src = table_parser(src_or_dst_types, unary(parse_host_arg)),
    host = unary(parse_host_arg),
-}
-
-local primitives = {
-   dst = table_parser(src_or_dst_types),
-   src = table_parser(src_or_dst_types),
-   host = unary(parse_host_arg),
-   ether = table_parser(ether_types),
-   gateway = unary(parse_string_arg),
-   net = unary(parse_net_arg),
-   port = unary(parse_port_arg),
-   portrange = unary(parse_portrange_arg),
-   less = unary(parse_int_arg),
-   greater = unary(parse_int_arg),
-   ip = table_parser(ip_types, nullary()),
-   ip6 = table_parser(ip6_types, nullary()),
-   proto = unary(parse_proto_arg),
-   tcp = table_parser(tcp_or_udp_types, nullary()),
-   udp = table_parser(tcp_or_udp_types, nullary()),
-   icmp = nullary(),
-   protochain = unary(parse_proto_arg),
-   arp = table_parser(arp_types, nullary()),
-   rarp = table_parser(rarp_types, nullary()),
-   atalk = nullary(),
-   aarp = nullary(),
-   decnet = table_parser(decnet_types),
-   iso = nullary(),
-   stp = nullary(),
-   ipx = nullary(),
-   netbeui = nullary(),
-   lat = nullary(),
-   moprc = nullary(),
-   mopdl = nullary(),
-   llc = parse_llc,
-   ifname = unary(parse_string_arg),
-   on = unary(parse_string_arg),
-   rnr = unary(parse_int_arg),
-   rulenum = unary(parse_int_arg),
-   reason = unary(enum_arg_parser(pf_reasons)),
-   rset = unary(parse_string_arg),
-   ruleset = unary(parse_string_arg),
-   srnr = unary(parse_int_arg),
-   subrulenum = unary(parse_int_arg),
-   action = unary(enum_arg_parser(pf_actions)),
-   wlan = table_parser(wlan_types),
-   type = parse_wlan_type,
-   subtype = parse_wlan_subtype,
-   dir = unary(enum_arg_parser(wlan_directions)),
-   vlan = parse_optional_int,
-   mpls = parse_optional_int,
-   pppoed = nullary(),
-   pppoes = parse_optional_int,
-   iso = table_parser(iso_types),
-   clnp = nullary(),
-   esis = nullary(),
-   isis = nullary(),
-   l1 = nullary(),
-   l2 = nullary(),
-   iih = nullary(),
-   lsp = nullary(),
-   snp = nullary(),
-   csnp = nullary(),
-   psnp = nullary(),
-   vpi = unary(parse_int_arg),
-   vci = unary(parse_int_arg),
-   lane = nullary(),
-   oamf4s = nullary(),
-   oamf4e = nullary(),
-   oamf4 = nullary(),
-   oam = nullary(),
-   metac = nullary(),
-   bcc = nullary(),
-   sc = nullary(),
-   ilmic = nullary(),
-   connectmsg = nullary(),
-   metaconnect = nullary()
 }
 
 local parse_arithmetic
@@ -740,6 +683,93 @@ function parse_arithmetic(lexer, tok, max_precedence, parsed_exp)
    end
 end
 
+local primitives = {
+   dst = table_parser(src_or_dst_types),
+   src = table_parser(src_or_dst_types),
+   host = unary(parse_host_arg),
+   ether = table_parser(ether_types),
+   fddi = table_parser(ether_types),
+   tr = table_parser(ether_types),
+   wlan = table_parser(wlan_types),
+   broadcast = nullary(),
+   multicast = nullary(),
+   gateway = unary(parse_string_arg),
+   net = unary(parse_net_arg),
+   port = unary(parse_port_arg),
+   portrange = unary(parse_portrange_arg),
+   less = unary(parse_arithmetic),
+   greater = unary(parse_arithmetic),
+   ip = table_parser(ip_types, nullary()),
+   ip6 = table_parser(ip6_types, nullary()),
+   proto = unary(parse_proto_arg),
+   tcp = table_parser(tcp_or_udp_types, nullary()),
+   udp = table_parser(tcp_or_udp_types, nullary()),
+   icmp = nullary(),
+   icmp6 = nullary(),
+   igmp = nullary(),
+   igrp = nullary(),
+   pim = nullary(),
+   ah = nullary(),
+   esp = nullary(),
+   vrrp = nullary(),
+   protochain = unary(parse_proto_arg),
+   arp = table_parser(arp_types, nullary()),
+   rarp = table_parser(rarp_types, nullary()),
+   atalk = nullary(),
+   aarp = nullary(),
+   decnet = table_parser(decnet_types, nullary()),
+   iso = nullary(),
+   stp = nullary(),
+   ipx = nullary(),
+   netbeui = nullary(),
+   sca = nullary(),
+   lat = nullary(),
+   moprc = nullary(),
+   mopdl = nullary(),
+   llc = parse_llc,
+   ifname = unary(parse_string_arg),
+   on = unary(parse_string_arg),
+   rnr = unary(parse_int_arg),
+   rulenum = unary(parse_int_arg),
+   reason = unary(enum_arg_parser(pf_reasons)),
+   rset = unary(parse_string_arg),
+   ruleset = unary(parse_string_arg),
+   srnr = unary(parse_int_arg),
+   subrulenum = unary(parse_int_arg),
+   action = unary(enum_arg_parser(pf_actions)),
+   type = parse_wlan_type,
+   subtype = parse_wlan_subtype,
+   dir = unary(enum_arg_parser(wlan_directions)),
+   vlan = parse_optional_int,
+   mpls = parse_optional_int,
+   pppoed = nullary(),
+   pppoes = parse_optional_int,
+   iso = table_parser(iso_types, nullary()),
+   clnp = nullary(),
+   esis = nullary(),
+   isis = nullary(),
+   l1 = nullary(),
+   l2 = nullary(),
+   iih = nullary(),
+   lsp = nullary(),
+   snp = nullary(),
+   csnp = nullary(),
+   psnp = nullary(),
+   vpi = unary(parse_int_arg),
+   vci = unary(parse_int_arg),
+   lane = nullary(),
+   oamf4s = nullary(),
+   oamf4e = nullary(),
+   oamf4 = nullary(),
+   oam = nullary(),
+   metac = nullary(),
+   bcc = nullary(),
+   sc = nullary(),
+   ilmic = nullary(),
+   connectmsg = nullary(),
+   metaconnect = nullary()
+}
+
 local function parse_primitive_or_arithmetic(lexer)
    local tok = lexer.next({maybe_arithmetic=true})
    if (type(tok) == 'number' or tok == 'len' or
@@ -759,10 +789,7 @@ local function parse_primitive_or_arithmetic(lexer)
    lexer.error('keyword elision not implemented %s', tok)
 end
 
-local logical_precedence = {
-   ['&&'] = 1, ['and'] = 1,
-   ['||'] = 2, ['or'] = 2
-}
+local logical_ops = set('&&', 'and', '||', 'or')
 
 local function is_arithmetic(exp)
    return (exp == 'len' or type(exp) == 'number' or
@@ -771,7 +798,7 @@ end
 
 local parse_logical
 
-local function parse_logical_or_arithmetic(lexer, max_precedence)
+local function parse_logical_or_arithmetic(lexer, pick_first)
    if lexer.check('not') then
       return { 'not', parse_logical(lexer) }
    else
@@ -792,29 +819,27 @@ local function parse_logical_or_arithmetic(lexer, max_precedence)
                 "expected a comparison operator, got "..op)
          exp = { op, exp, parse_arithmetic(lexer) }
       end
-      max_precedence = max_precedence or math.huge
       while true do
          local op = lexer.peek()
          if not op or op == ')' then return exp end
-         local prec = logical_precedence[op]
-         if prec then
-            if prec > max_precedence then return exp end
+         local is_logical = logical_ops[op]
+         if is_logical then
+            if pick_first then return exp end
             lexer.consume(op)
          else
             -- The grammar is such that "tcp port 80" should actually
             -- parse as "tcp and port 80".
             op = 'and'
-            prec = 1
-            if prec > max_precedence then return exp end
+            if pick_first then return exp end
          end
-         local rhs = parse_logical(lexer, prec - 1)
+         local rhs = parse_logical(lexer, true)
          exp = { op, exp, rhs }
       end
    end
 end
 
-function parse_logical(lexer, max_precedence)
-   local expr = parse_logical_or_arithmetic(lexer)
+function parse_logical(lexer, pick_first)
+   local expr = parse_logical_or_arithmetic(lexer, pick_first)
    assert(not is_arithmetic(expr), "expected a logical expression")
    return expr
 end
@@ -880,10 +905,24 @@ function selftest ()
                 { 'ipv4/len', { 'ipv4', 10, 0, 0, 0 }, 24 }})
    parse_test("ether proto rarp",
               { 'ether_proto', 'rarp' })
+   parse_test("ether proto \\rarp",
+              { 'ether_proto', 'rarp' })
+   parse_test("ether proto \\100",
+              { 'ether_proto', 100 })
+   parse_test("ip proto tcp",
+              { 'ip_proto', 'tcp' })
+   parse_test("ip proto \\tcp",
+              { 'ip_proto', 'tcp' })
+   parse_test("ip proto \\0",
+              { 'ip_proto', 0 })
    parse_test("decnet host 10.23",
               { 'decnet_host', { 'decnet', 10, 23 } })
    parse_test("ip proto icmp",
               { 'ip_proto', 'icmp' })
+   parse_test("ip6 protochain icmp",
+              { 'ip6_protochain', 'icmp' })
+   parse_test("ip6 protochain 100",
+              { 'ip6_protochain', 100 })
    parse_test("ip",
               { 'ip' })
    parse_test("type mgt",
@@ -896,6 +935,12 @@ function selftest ()
               { '=', { '+', { '+', 1, { '*', 2, 3 } }, 4 }, 5 })
    parse_test("1+1=2 and tcp",
               { 'and', { '=', { '+', 1, 1 }, 2 }, { 'tcp' } })
+   parse_test("tcp port 80 and 1+1=2",
+              { 'and', { 'tcp_port', 80 }, { '=', { '+', 1, 1 }, 2 } })
+   parse_test("1+1=2 and tcp or tcp",
+              { 'or', { 'and', { '=', { '+', 1, 1 }, 2 }, { 'tcp' } }, { 'tcp' } })
+   parse_test("1+1=2 or tcp and tcp",
+              { 'and', { 'or', { '=', { '+', 1, 1 }, 2 }, { 'tcp' } }, { 'tcp' } })
    parse_test("1+1=2 and (tcp)",
               { 'and', { '=', { '+', 1, 1 }, 2 }, { 'tcp' } })
    parse_test("tcp src portrange 80-90", 
@@ -911,8 +956,14 @@ function selftest ()
                     { ">>", { "&", { "[tcp]", 12, 1 }, 240 }, 2 } }, 0 } })
    parse_test("ether host ff:ff:ff:33:33:33",
              { 'ether_host', { 'ehost', 255, 255, 255, 51, 51, 51 } })
+   parse_test("fddi host ff:ff:ff:33:33:33",
+             { 'fddi_host', { 'ehost', 255, 255, 255, 51, 51, 51 } })
+   parse_test("tr host ff:ff:ff:33:33:33",
+             { 'tr_host', { 'ehost', 255, 255, 255, 51, 51, 51 } })
+   parse_test("wlan host ff:ff:ff:33:33:33",
+             { 'wlan_host', { 'ehost', 255, 255, 255, 51, 51, 51 } })
    parse_test("ether host f:f:f:3:3:3",
-             { 'ether_host', { 'ehost', 240, 240, 240, 48, 48, 48 } })
+             { 'ether_host', { 'ehost', 15, 15, 15, 3, 3, 3 } })
    parse_test("src net 192.168.1.0/24",
              { 'src_net', { 'ipv4/len', { 'ipv4', 192, 168, 1, 0 }, 24 } })
    parse_test("src net 192.168.1.0 mask 255.255.255.0",
@@ -931,5 +982,7 @@ function selftest ()
              { 'src_net', { 'ipv4/len', { 'ipv4', 192, 168, 1, 0 }, 24 } })
    parse_test("src net 192.168.1.0 mask 255.255.255.0",
              { 'src_net', { 'ipv4/mask', { 'ipv4', 192, 168, 1, 0 }, { 'ipv4', 255, 255, 255, 0 } } })
+   parse_test("less 100", {"less", 100})
+   parse_test("greater 50 + 50", {"greater", {"+", 50, 50}})
    print("OK")
 end
