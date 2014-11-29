@@ -111,4 +111,51 @@ function ns_responder:push()
    end
 end
 
+function selftest()
+   -- Check pflang filter is working OK
+   local TOTAL_FILTERED_PACKETS = 9
+
+   local pcap = require("apps.pcap.pcap")
+   local basic_apps = require("apps.basic.basic_apps")
+   local PacketFilter = require("apps.pflua_packet_filter.packet_filter")
+
+   local pcapfile = "apps/packet_filter/samples/v6.pcap"
+   local ok = true
+
+   local filters = {
+      "icmp6 and ip6[40] = 135"
+   }
+
+   buffer.preallocate(10000)
+
+   local c = config.new()
+   config.app(c, "source1", pcap.PcapReader, pcapfile)
+   config.app(c, "packet_filter", PacketFilter, filters)
+
+   config.app(c,  "sink1", basic_apps.Sink )
+   config.link(c, "source1.output -> packet_filter.input")
+   config.link(c, "packet_filter.output -> sink1.input")
+
+   app.configure(c)
+   app.breathe()
+   app.report()
+
+   local packets = {
+      filtered = app.app_table.packet_filter.output.output.stats.txpackets 
+   }
+
+   if packets.filtered ~= TOTAL_FILTERED_PACKETS then
+      print("IPv6 test failed")
+      ok = false
+   end
+
+   if not ok then
+      print("selftest failed")
+      os.exit(1)
+   end
+   print("selftest passed")
+end
+
+ns_responder.selftest = selftest
+
 return ns_responder
