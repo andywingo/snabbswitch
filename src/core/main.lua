@@ -9,7 +9,7 @@ local ffi = require("ffi")
 local zone = require("jit.zone")
 local C   = ffi.C
 
-require("lib.lua.strict")
+-- require("lib.lua.strict")
 require("lib.lua.class")
 
 -- Reserve names that we want to use for global module.
@@ -46,7 +46,7 @@ parameters = {}
 
 function main ()
    zone("startup")
-   require "lib.lua.strict"
+   -- require "lib.lua.strict"
    initialize()
    local args = command_line_args()
    if #args == 0 then
