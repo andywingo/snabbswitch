@@ -3,7 +3,7 @@ module(...,package.seeall)
 local bit = require('bit')
 local utils = require('pf.utils')
 
-verbose = os.getenv("PF_VERBOSE");
+local verbose = os.getenv("PF_VERBOSE");
 
 local expand_arith, expand_relop, expand_bool
 
@@ -224,7 +224,7 @@ function simplify_if(test, t, f)
       -- if A B (if C B D) -> if (if A true C) B D
       return simplify_if(simplify_if(test, { 'true' }, f[2]), t, f[4])
    end
-   if t[1] == 'if' and cfkey(f) == cfkey(t[3]) and not simple[f[1]] then
+   if t[1] == 'if' and cfkey(f) == cfkey(t[4]) and not simple[f[1]] then
       -- if A (if B C D) D -> if (if A B false) C D
       return simplify_if(simplify_if(test, t[2], { 'false' }), t[3], f)
    end
@@ -306,9 +306,26 @@ local function Range(min, max)
    function ret.sub(lhs, rhs) return lhs:binary(rhs, '-') end
    function ret.mul(lhs, rhs) return lhs:binary(rhs, '*') end
    function ret.div(lhs, rhs)
-      if rhs:min() > 0 or rhs:max() < 0 then return lhs:binary(rhs, '/') end
-      -- 0 is prohibited by assertions.
-      local low, high = Range(rhs:min(), -1), Range(1, rhs:max())
+      local rhs_min, rhs_max = rhs:min(), rhs:max()
+      -- 0 is prohibited by assertions, so we won't hit it at runtime,
+      -- but we could still see { '/', 0, 0 } in the IR when it is
+      -- dominated by an assertion that { '!=', 0, 0 }.  The resulting
+      -- range won't include the rhs-is-zero case.
+      if rhs_min == 0 then
+         -- If the RHS is (or folds to) literal 0, we certainly won't
+         -- reach here so we can make up whatever value we want.
+         if rhs_max == 0 then return Range(0, 0) end
+         rhs_min = 1
+      elseif rhs_max == 0 then
+         rhs_max = -1
+      end
+      -- Now that we have removed 0 from the limits,
+      -- if the RHS can't change sign, we can use binary() on its range.
+      if rhs_min > 0 or rhs_max < 0 then
+         return lhs:binary(Range(rhs_min, rhs_max), '/')
+      end
+      -- Otherwise we can use binary() on the two semi-ranges.
+      local low, high = Range(rhs_min, -1), Range(1, rhs_max)
       return lhs:binary(low, '/'):union(lhs:binary(high, '/'))
    end
    function ret.band(lhs, rhs)
@@ -694,6 +711,8 @@ function selftest ()
       opt("1 = 2"))
    assert_equals({ '=', "len", 1 },
       opt("1 = len"))
+   assert_equals({ 'true' },
+      opt("1 = 2/2"))
    assert_equals({ 'if', { '>=', 'len', 1},
                    { '=', { '[]', 0, 1 }, 2 },
                    { 'fail' }},

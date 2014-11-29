@@ -9,13 +9,13 @@ local ffi = require("ffi")
 local zone = require("jit.zone")
 local C   = ffi.C
 
-require("lib.lua.strict")
+-- require("lib.lua.strict")
 require("lib.lua.class")
 
 -- Reserve names that we want to use for global module.
 -- (This way we avoid errors from the 'strict' module.)
 _G.config, _G.engine, _G.memory, _G.link, _G.buffer, _G.packet, _G.timer,
-   _G.main = nil
+   _G.pflua, _G.main = nil
 
 ffi.cdef[[
       extern int argc;
@@ -34,17 +34,19 @@ Available options are:
 -jdump file  Trace JIT decisions to 'file'. (Requires LuaJIT jit.* library.)
 -jp          Profile with the LuaJIT statistical profiler.
 -jp=args[,.output]
+-pflua       Use pflua for packet filtering.
 ]]
 
 debug_on_error = false
 profiling = false
+pflua = true
 
 -- List of parameters passed on the command line.
 parameters = {}
 
 function main ()
    zone("startup")
-   require "lib.lua.strict"
+   -- require "lib.lua.strict"
    initialize()
    local args = command_line_args()
    if #args == 0 then
@@ -57,31 +59,38 @@ function main ()
          package.path = args[i+1]
          i = i + 2
       elseif args[i] == '-l' and i < #args then
-	 require(args[i+1])
-	 i = i + 2
+         require(args[i+1])
+         i = i + 2
       elseif args[i] == '-t' and i < #args then
          zone("selftest")  require(args[i+1]).selftest()  zone()
          i = i + 2
       elseif args[i] == '-e' and i < #args then
-	 local thunk, error = loadstring(args[i+1])
-	 if thunk then thunk() else print(error) end
-	 i = i + 2
+         local thunk, error = loadstring(args[i+1])
+         if thunk then thunk() else print(error) end
+         i = i + 2
       elseif args[i] == '-d' then
-	 debug_on_error = true
-	 i = i + 1
+         debug_on_error = true
+         i = i + 1
       elseif args[i] == '-S' then
          debug.traceback = STP.stacktrace
-        i = i + 1
+         i = i + 1
       elseif (args[i]):match("-jp") then
-	 local pargs, poutput = (args[i]):gmatch("-jp=([^,]*),?(.*)")()
-	 if poutput == '' then poutput = nil end
-	 require("jit.p").start(pargs, poutput)
-	 profiling = true
-	 i = i + 1
+         local pargs, poutput = (args[i]):gmatch("-jp=([^,]*),?(.*)")()
+         if poutput == '' then poutput = nil end
+         require("jit.p").start(pargs, poutput)
+         profiling = true
+         i = i + 1
       elseif args[i] == '-jdump' and i < #args then
-	 local jit_dump = require "jit.dump"
-	 jit_dump.start("", args[i+1])
-	 i = i + 2
+         local jit_dump = require "jit.dump"
+         jit_dump.start("", args[i+1])
+         i = i + 2
+      elseif args[i] == '-jv' and i < #args then
+         local jit_verbose = require 'jit.v'
+         jit_verbose.start(args[i+1])
+         i = i + 2
+      elseif args[i] == '-pflua' then
+         pflua = true
+         i = i + 1
       elseif i <= #args then
          -- Syntax: <script> [args...]
          local module = args[i]
@@ -94,8 +103,8 @@ function main ()
          dofile(module)
          exit(0)
       else
-	 print(usage)
-	 os.exit(1)
+         print(usage)
+         os.exit(1)
       end
    end
    exit(0)
@@ -123,6 +132,7 @@ function initialize ()
    _G.buffer = require("core.buffer")
    _G.packet = require("core.packet")
    _G.timer  = require("core.timer")
+   _G.pflua  = pflua
    _G.main   = getfenv()
 end
 
