@@ -1,6 +1,7 @@
 module(...,package.seeall)
 
 local ffi = require("ffi")
+local C = ffi.C
 
 ffi.cdef[[
 typedef long time_t;
@@ -18,7 +19,7 @@ int gettimeofday(struct timeval *tv, struct timezone *tz);
 local zero_sec, zero_usec
 function now()
    local tv = ffi.new("struct timeval")
-   assert(ffi.C.gettimeofday(tv, nil) == 0)
+   assert(C.gettimeofday(tv, nil) == 0)
    if not zero_sec then
       zero_sec = tv.tv_sec
       zero_usec = tv.tv_usec
@@ -30,7 +31,7 @@ end
 
 function gmtime()
    local tv = ffi.new("struct timeval")
-   assert(ffi.C.gettimeofday(tv, nil) == 0)
+   assert(C.gettimeofday(tv, nil) == 0)
    local secs = tonumber(tv.tv_sec)
    secs = secs + tonumber(tv.tv_usec) * 1e-6
    return secs
@@ -120,6 +121,12 @@ end
 function ipv6_as_4x32(addr)
    local function c(i, j) return addr[i] * 2^16 + addr[j] end
    return { c(2,3), c(4,5), c(6,7), c(8,9) }
+end
+
+function fixpoint(f, expr)
+   local prev
+   repeat expr, prev = f(expr), expr until equals(expr, prev)
+   return expr
 end
 
 function selftest ()

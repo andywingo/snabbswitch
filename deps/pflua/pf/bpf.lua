@@ -4,7 +4,7 @@ local ffi = require("ffi")
 local bit = require("bit")
 local band = bit.band
 
-verbose = os.getenv("PF_VERBOSE");
+local verbose = os.getenv("PF_VERBOSE");
 
 local function BPF_CLASS(code) return band(code, 0x07) end
 local BPF_LD   = 0x00
@@ -83,6 +83,15 @@ local function runtime_div(a, b)
    -- The code generator already asserted b is a non-zero constant.
    return bit.tobit(math.floor(runtime_u32(a) / runtime_u32(b)))
 end
+
+local env = {
+   bit = require('bit'),
+   runtime_u32 = runtime_u32,
+   runtime_add = runtime_add,
+   runtime_sub = runtime_sub,
+   runtime_mul = runtime_mul,
+   runtime_div = runtime_div,
+}
 
 local function is_power_of_2(k)
    if k == 0 then return false end
@@ -247,7 +256,7 @@ function compile_lua(bpf)
          assert(src == BPF_K, "division by non-constant value is unsupported")
          assert(k ~= 0, "program contains division by constant zero")
          local bits = is_power_of_2(k)
-         if bits then rhs = shr(A(), bits) else rhs = div(A(), k) end
+         if bits then rhs = rsh(A(), bits) else rhs = div(A(), k) end
       elseif op == BPF_OR  then rhs = bor(A(), b)
       elseif op == BPF_AND then rhs = band(A(), b)
       elseif op == BPF_LSH then rhs = lsh(A(), b)
@@ -430,15 +439,9 @@ function disassemble(bpf)
 end
 
 function compile(bpf)
-   -- Oddly, sometimes pflua-bench:src/bench.lua doesn't pick these up
-   -- sometimes.  Perhaps we should constructively create an
-   -- environment.
-   if not getfenv(0).runtime_u32 then getfenv(0).runtime_u32 = runtime_u32 end
-   if not getfenv(0).runtime_add then getfenv(0).runtime_add = runtime_add end
-   if not getfenv(0).runtime_sub then getfenv(0).runtime_sub = runtime_sub end
-   if not getfenv(0).runtime_mul then getfenv(0).runtime_mul = runtime_mul end
-   if not getfenv(0).runtime_div then getfenv(0).runtime_div = runtime_div end
-   return assert(loadstring(compile_lua(bpf)))()
+   local func = assert(loadstring(compile_lua(bpf)))
+   setfenv(func, env)
+   return func()
 end
 
 function dump(bpf)
