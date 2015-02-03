@@ -34,6 +34,9 @@ check_luajit:
 	    echo "Can't find deps/luajit/. You might need to: git submodule update --init"; exit 1; \
 	fi
 
+test_pflua: check_luajit
+	PATH=`pwd`/deps/luajit/usr/local/bin:$$PATH make -C deps/pflua check
+
 clean:
 	(cd deps/luajit && $(MAKE) clean)
 	(cd src; $(MAKE) clean)

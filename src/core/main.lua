@@ -15,7 +15,7 @@ require("lib.lua.class")
 -- Reserve names that we want to use for global module.
 -- (This way we avoid errors from the 'strict' module.)
 _G.config, _G.engine, _G.memory, _G.link, _G.buffer, _G.packet, _G.timer,
-   _G.main = nil
+   _G.pflua, _G.main = nil
 
 ffi.cdef[[
       extern int argc;
@@ -37,6 +37,7 @@ Available options are:
 -jv file     Prints verbose information about the the JIT compiler to 'file'.
 -jp          Profile with the LuaJIT statistical profiler.
 -jp=args[,.output]
+-pflua       Use pflua for packet filtering.
 ]]
 
 _G.developer_debug = false
@@ -96,6 +97,8 @@ function main ()
          i = i + 2
       elseif args[i] == '-R' then
          start_repl = true
+      elseif args[i] == '-pflua' then
+         _G.pflua = true
          i = i + 1
       elseif i <= #args then
          -- Syntax: <script> [args...]
