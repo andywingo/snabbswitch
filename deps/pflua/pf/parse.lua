@@ -20,9 +20,8 @@ local function set(...)
 end
 
 local punctuation = set(
-   '(', ')', '[', ']', '!', '!=', '<', '<=', '>', '>=', '=',
-   '+', '-', '*', '/', '&', '|', '^', '&&', '||', '<<', '>>',
-   '\\'
+   '(', ')', '[', ']', '!', '!=', '<', '<=', '>', '>=', '=', '==',
+   '+', '-', '*', '/', '&', '|', '^', '&&', '||', '<<', '>>', '\\'
 )
 
 local function lex_host_or_keyword(str, pos)
@@ -425,6 +424,8 @@ local function parse_portrange_arg(lexer)
       end
       local from, to = to_port_number(tok:sub(1, pos - 2)), to_port_number(tok:sub(pos))
       if from and to then
+         -- For libpcap compatibility, if to < from, swap them
+         if from > to then from, to = to, from end
          return { from, to }
       end
    end
@@ -695,8 +696,8 @@ local function parse_primary_arithmetic(lexer, tok)
       local size = 1
       if lexer.check(':') then
          if lexer.check(1) then size = 1
-         elseif lexer.check(2) then size = 1
-         else lexer.consume(4); size = 1 end
+         elseif lexer.check(2) then size = 2
+         else lexer.consume(4); size = 4 end
       end
       lexer.consume(']')
       return { '['..tok..']', pos, size}
@@ -761,6 +762,7 @@ local primitives = {
    ah = nullary(),
    esp = nullary(),
    vrrp = nullary(),
+   sctp = nullary(),
    protochain = unary(parse_proto_arg),
    arp = table_parser(arp_types, nullary()),
    rarp = table_parser(rarp_types, nullary()),
@@ -864,8 +866,10 @@ local function parse_logical_or_arithmetic(lexer, pick_first)
          end
          if lexer.peek() == ')' then return exp end
          local op = lexer.next()
-         assert(set('>', '<', '>=', '<=', '=', '!=')[op],
+         assert(set('>', '<', '>=', '<=', '=', '!=', '==')[op],
                 "expected a comparison operator, got "..op)
+         -- Normalize == to =, because libpcap treats them identically
+         if op == '==' then op = '=' end
          exp = { op, exp, parse_arithmetic(lexer) }
       end
       while true do
@@ -980,6 +984,9 @@ function selftest ()
               { 'type', 'mgt', 'deauth' })
    parse_test("1+1=2",
               { '=', { '+', 1, 1 }, 2 })
+   parse_test("len=4", { '=', 'len', 4 })
+   parse_test("len == 4", { '=', 'len', 4 })
+   parse_test("sctp", { 'sctp' })
    parse_test("1+2*3+4=5",
               { '=', { '+', { '+', 1, { '*', 2, 3 } }, 4 }, 5 })
    parse_test("1+1=2 and tcp",
@@ -997,7 +1004,7 @@ function selftest ()
    parse_test("tcp src portrange ftp-data-90",
               { 'tcp_src_portrange', { 20, 90 } })
    parse_test("tcp src portrange 80-ftp-data",
-              { 'tcp_src_portrange', { 80, 20 } })
+              { 'tcp_src_portrange', { 20, 80 } }) -- swapped!
    parse_test("tcp src portrange ftp-data-iso-tsap",
               { 'tcp_src_portrange', { 20, 102 } })
    parse_test("tcp src portrange echo-ftp-data",
@@ -1008,7 +1015,7 @@ function selftest ()
               { "and",
                  { "tcp_port", 80 },
                  { "!=",
-                    { "-", { "-", { "[ip]", 2, 1 },
+                    { "-", { "-", { "[ip]", 2, 2 },
                        { "<<", { "&", { "[ip]", 0, 1 }, 15 }, 2 } },
                     { ">>", { "&", { "[tcp]", 12, 1 }, 240 }, 2 } }, 0 } })
    parse_test("ether host ff:ff:ff:33:33:33",
