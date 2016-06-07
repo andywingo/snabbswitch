@@ -8,7 +8,7 @@
 
 module(..., package.seeall)
 
-local debug = _G.developer_debug or true
+local debug = _G.developer_debug
 
 local ffi    = require("ffi")
 local C      = ffi.C
@@ -22,9 +22,13 @@ local physical = memory.virtual_to_physical
 local VirtioVirtq = {}
 VirtioVirtq.__index = VirtioVirtq
 
+local PACKET_HEADROOM_SIZE = C.PACKET_HEADROOM_SIZE
+local VRING_F_NO_INTERRUPT = C.VRING_F_NO_INTERRUPT
+local VRING_F_NO_NOTIFY = C.VRING_F_NO_NOTIFY
+
 local pk_header_t = ffi.typeof("struct virtio_net_hdr")
 local pk_header_size = ffi.sizeof(pk_header_t)
-assert(pk_header_size < C.PACKET_HEADROOM_SIZE)
+assert(pk_header_size < PACKET_HEADROOM_SIZE)
 local vring_desc_t = ffi.typeof("struct vring_desc")
 
 local ringtypes = {}
@@ -79,7 +83,7 @@ local function allocate_virtq(n)
       vr.num_free = vr.num_free + 1
    end
    -- Disable the interrupts forever, we don't need them
-   vr.vring.avail.flags = C.VRING_F_NO_INTERRUPT
+   vr.vring.avail.flags = VRING_F_NO_INTERRUPT
    return vr
 end
 
@@ -97,9 +101,9 @@ function VirtioVirtq:add(p, len, flags, csum_start, csum_offset)
    local header_addr = p.data - pk_header_size
    local header = ffi.cast("struct virtio_net_hdr *", header_addr)
    ffi.fill(header_addr, pk_header_size, 0)
-   header.flags = flags
-   header.csum_start = csum_start
-   header.csum_offset = csum_offset
+   --header.flags = flags
+   --header.csum_start = csum_start
+   --header.csum_offset = csum_offset
    desc.addr = physical(header_addr)
    desc.len = len + pk_header_size
    desc.flags = 0
@@ -154,7 +158,7 @@ end
 
 function VirtioVirtq:should_notify()
    -- Notify only if the used ring lacks the "no notify" flag
-   return band(self.vring.used.flags, C.VRING_F_NO_NOTIFY) == 0
+   return band(self.vring.used.flags, VRING_F_NO_NOTIFY) == 0
 end
 
 return {
