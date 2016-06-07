@@ -31,10 +31,8 @@ local ETHERTYPE_OFF = 12
 local ETHERLEN = 14 -- DST MAC | SRC MAC | ethertype
 local VIRTIO_NET_HDR_F_NEEDS_CSUM = 1
 
-local min_features =   C.VIRTIO_RING_F_INDIRECT_DESC + C.VIRTIO_NET_F_CSUM
-local want_features =  C.VIRTIO_F_ANY_LAYOUT +
-                       C.VIRTIO_RING_F_INDIRECT_DESC +
-                       C.VIRTIO_NET_F_MAC
+local min_features = C.VIRTIO_NET_F_CSUM + C.VIRTIO_F_ANY_LAYOUT
+local want_features =  C.VIRTIO_NET_F_MAC
 
 local RXQ = 0
 local TXQ = 1
