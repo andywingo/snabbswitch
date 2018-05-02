@@ -99,6 +99,13 @@ function from_string(str)
    return stream.open(io, readable, writable)
 end
 
+function call_with_output_string(f, ...)
+   local out = tmpfile()
+   f(..., out)
+   -- Can take advantage of internals to read directly.
+   return ffi.string(out.io.buf, out.io.len)
+end
+
 function selftest()
    print('selftest: lib.stream.mem')
    local str = "hello, world!"
