@@ -6,6 +6,7 @@ local ffi = require("ffi")
 local lib = require("core.lib")
 local shm = require("core.shm")
 local mem = require("lib.stream.mem")
+local file = require("lib.stream.file")
 local rpc = require("lib.yang.rpc")
 local yang = require("lib.yang.yang")
 local data = require("lib.yang.data")
@@ -115,12 +116,13 @@ function parse_command_line(args, opts)
    end
    if opts.with_value then
       local parser = data_parser(ret.schema_name, ret.path, opts.is_config)
+      local stream
       if #args == 0 then
-         ret.value_str = io.stdin:read('*a')
+         stream = file.fdopen(0, 'r')
       else
-         ret.value_str = table.remove(args, 1)
+         stream = mem.from_string(table.remove(args, 1))
       end
-      ret.value = parser(ret.value_str)
+      ret.value = parser(stream)
    end
    if not opts.allow_extra_args and #args ~= 0 then err("too many arguments") end
    return ret, args

@@ -33,7 +33,7 @@ function Mem:block() end
 
 function Mem:read(buf, count)
    count = math.min(count, self.len - self.pos)
-   ffi.copy(buf, self.buf, count)
+   ffi.copy(buf, self.buf + self.pos, count)
    self.pos = self.pos + count
    return count
 end
@@ -53,7 +53,7 @@ end
 function Mem:write(buf, count)
    if self.pos == self.len then self:grow_buffer(count) end
    count = math.min(count, self.len - self.pos)
-   ffi.copy(self.buf, buf, count)
+   ffi.copy(self.buf + self.pos, buf, count)
    self.pos = self.pos + count
    return count
 end

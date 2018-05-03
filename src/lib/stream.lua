@@ -274,7 +274,11 @@ function Stream:read_line(eol_style) -- 'discard' or 'keep'
    local add_lf = assert(({discard=0, keep=1})[eol_style])
    while true do
       if self.rx:is_empty() then
-         if self:fill_rx_buffer() == 0 then return nil end
+         if self:fill_rx_buffer() == 0 then
+            -- EOF.
+            if #head == 0 then return nil end
+            return table.concat(head)
+         end
       end
       local buf, avail = self.rx:peek()
       local lf = string.byte("\n")

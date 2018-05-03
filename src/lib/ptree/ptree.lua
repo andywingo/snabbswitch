@@ -366,7 +366,7 @@ function Manager:handle_rpc_update_config (args, verb, compute_update_fn)
    local path = path_mod.normalize_path(args.path)
    local parser = path_data.parser_for_schema_by_name(args.schema, path)
    self:update_configuration(compute_update_fn(args.schema, path),
-                             verb, path, parser(args.config))
+                             verb, path, parser(mem.from_string(args.config)))
    return {}
 end
 
@@ -417,7 +417,7 @@ function Manager:foreign_rpc_set_config (schema_name, path, config_str)
    local translate = self:get_translator(schema_name)
    local parser = path_data.parser_for_schema_by_name(schema_name, path)
    local updates = translate.set_config(self.current_configuration, path,
-                                        parser(config_str))
+                                        parser(mem.from_string(config_str)))
    return self:apply_translated_rpc_updates(updates)
 end
 function Manager:foreign_rpc_add_config (schema_name, path, config_str)
@@ -425,7 +425,7 @@ function Manager:foreign_rpc_add_config (schema_name, path, config_str)
    local translate = self:get_translator(schema_name)
    local parser = path_data.parser_for_schema_by_name(schema_name, path)
    local updates = translate.add_config(self.current_configuration, path,
-                                        parser(config_str))
+                                        parser(mem.from_string(config_str)))
    return self:apply_translated_rpc_updates(updates)
 end
 function Manager:foreign_rpc_remove_config (schema_name, path)
