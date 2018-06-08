@@ -7,6 +7,11 @@ local S = require("syscall")
 local lib = require("core.lib")
 local mem = require("lib.stream.mem")
 
+local function now()
+   local tv = S.gettimeofday()
+   return tonumber(tv.tv_sec) + tonumber(tv.tv_usec) * 1e-6
+end
+
 -- Round-robin database.
 local RRD = {}
 
@@ -20,7 +25,7 @@ local fixed_header_t = ffi.typeof [[struct {
    double float_cookie;
    uint64_t source_count;
    uint64_t archive_count;
-   uint64_t pdp_step; /* pdp interval in seconds */
+   uint64_t seconds_per_pdp;
    uint64_t unused[10];
 }]]
 
@@ -45,7 +50,7 @@ local function variable_header_t(source_count, archive_count)
       struct {
          char consolidation_function[20];
          uint64_t row_count;
-         uint64_t pdp_count; /* How many PDPs per CDP.  */
+         uint64_t pdps_per_cdp;
          double min_coverage; /* Fraction of a CDP that must be known. */
          uint64_t unused[9];
       } archives[$]; /* One for each archive (RRA). */
@@ -55,19 +60,19 @@ local function variable_header_t(source_count, archive_count)
       } last_update;
       struct {
          union {
-            /* The stock RRD tool uses an ascii representation of the
-               last reading, in a 30-byte buffer.  For our purposes, 
-               we just alias the front part of it with raw data.  NaN
-               indicates unknown.  */
+            /* To compute a rate value from counters, the RRD format
+               stores the last reading.  Weirdly, the stock RRD tool
+               uses an ascii representation in a 30-byte buffer.  For
+               our purposes, we just alias the front part of it with raw
+               data.  */
             struct {
-               uint64_t as_uint64;
-               double as_double;
+               uint64_t counter;
                uint8_t is_known;
             } raw;
             char as_chars[30];
          } last_reading;
          uint64_t unknown_count;
-         double value;
+         double diff;
          uint64_t unused[8];
       } pdp_prep[$]; /* One for each data source. */
       struct {
@@ -76,13 +81,7 @@ local function variable_header_t(source_count, archive_count)
          /* How many unknown pdp were integrated. This and the min_coverage
             will decide if this is going to be a UNKNOWN or a valid value. */
          uint64_t unknown_count;
-         uint64_t unused[6];
-         /* Optimization for bulk updates: the value of the first CDP
-            value to be written in the bulk update. */
-         double primary_val;
-         /* Optimization for bulk updates: the value of subsequent CDP
-             values to be written in the bulk update. */
-         double secondary_val;
+         uint64_t unused[8];
       } cdp_prep[$]; /* One for each data source and archive.  */
       uint64_t current_row[$]; /* One for each archive. */
    }]]
@@ -118,6 +117,7 @@ function open_rrd(ptr, size, filename)
    assert(ffi.string(rrd.fixed.cookie, 4) == rrd_cookie)
    assert(ffi.string(rrd.fixed.version, 5) == rrd_version)
    assert(rrd.fixed.float_cookie == float_cookie)
+   rrd.seconds_per_pdp = tonumber(rrd.fixed.seconds_per_pdp)
    rrd.var = read(variable_header_t(tonumber(rrd.fixed.source_count),
                                     tonumber(rrd.fixed.archive_count)))
    rrd.archives = {}
@@ -146,15 +146,23 @@ function open_rrd_file(filename)
    return res
 end
 
-local function create_rrd(sources, archives, period)
+local function partial_pdp_time(t, seconds_per_pdp)
+   return t % seconds_per_pdp
+end
+
+local function partial_cdp_pdps(t, seconds_per_pdp, pdps_per_cdp)
+   return math.floor((t % (seconds_per_pdp * pdps_per_cdp)) / seconds_per_pdp)
+end
+
+local function create_rrd(sources, archives, seconds_per_pdp)
    local stream = mem.tmpfile()
    local fixed = fixed_header_t()
    ffi.copy(fixed.cookie, rrd_cookie, #rrd_cookie)
    ffi.copy(fixed.version, rrd_version, #rrd_version)
    fixed.float_cookie = float_cookie
    fixed.source_count, fixed.archive_count = #sources, #archives
-   assert(period == math.floor(period) and period > 0)
-   fixed.pdp_step = period
+   assert(seconds_per_pdp == math.floor(seconds_per_pdp) and seconds_per_pdp > 0)
+   fixed.seconds_per_pdp = seconds_per_pdp
    stream:write_struct(fixed_header_t, fixed)
    local var_t = variable_header_t(#sources, #archives)
    local var = var_t()
@@ -164,7 +172,7 @@ local function create_rrd(sources, archives, period)
       s.name = source.name
       assert(string.len(source.type) < ffi.sizeof(s.type))
       s.type = source.type
-      s.min_heartbeat_period = source.min_heartbeat_period or 0
+      s.min_heartbeat_period = source.min_heartbeat_period or seconds_per_pdp
       s.min_value = source.min_value or 0/0
       s.max_value = source.max_value or 0/0
    end
@@ -173,29 +181,27 @@ local function create_rrd(sources, archives, period)
       assert(consolidation_functions[archive.consolidation_function])
       a.consolidation_function = archive.consolidation_function
       a.row_count = assert(archive.row_count)
-      a.pdp_count = math.floor(archive.period / period + 0.5)
-      assert(a.pdp_count > 0)
+      a.pdps_per_cdp = math.floor(archive.period / seconds_per_pdp + 0.5)
+      assert(a.pdps_per_cdp > 0)
       a.min_coverage = archive.min_coverage or 0.5
       assert(a.min_coverage >= 0 and a.min_coverage <= 1)
    end
-   local tv = S.gettimeofday()
-   var.last_update.seconds, var.last_update.useconds = tv.tv_sec, tv.tv_usec
+   local t = now()
+   var.last_update.seconds = math.floor(t)
+   var.last_update.useconds = (t - math.floor(t)) * 1e6
    for i=0,#sources-1 do
       local pdp = var.pdp_prep[i]
-      pdp.last_reading.raw.is_known = false
-      pdp.unknown_count = var.last_update.seconds % fixed.pdp_step
-      pdp.value = 0/0
+      pdp.last_reading.raw.is_known = 0
+      pdp.unknown_count = partial_pdp_time(
+         var.last_update.seconds, seconds_per_pdp)
+      pdp.diff = 0/0
    end
    for i=0,#archives-1 do
       for j=0,#sources-1 do
          local cdp = var.cdp_prep[i*#sources + j]
          cdp.value = 0/0
-         cdp.unknown_count =
-            (var.last_update.seconds - var.pdp_prep.unknown_count) %
-            (fixed.pdp_step * var.archives[i].pdp_count) / fixed.pdp_step
-         -- FIXME: needed?
-         cdp.primary_val = 0/0
-         cdp.secondary_val = 0/0
+         cdp.unknown_count = partial_cdp_pdps(t, seconds_per_pdp,
+                                              tonumber(var.archives[i].pdps_per_cdp))
       end
    end
    for i=0,#archives-1 do
@@ -205,8 +211,8 @@ local function create_rrd(sources, archives, period)
    for i=0,#archives-1 do
       local t = archive_t(#sources, tonumber(var.archives[i].row_count))
       local archive = t()
-      for row=0,var.archives[i].row_count-1 do
-         for source in 0,#sources-1 do
+      for row=0,tonumber(var.archives[i].row_count)-1 do
+         for source=0,#sources-1 do
             archive.rows[row].values[source] = 0/0
          end
       end
@@ -243,8 +249,8 @@ function RRD:iarchives()
       if i >= rrd.fixed.archive_count then return nil end
       local a = rrd.var.archives[i]
       local cf = ffi.string(a.consolidation_function)
-      local rows, window, xff = a.row_count, a.pdp_count, a.min_coverage
-      return i, cf, tonumber(rows), tonumber(window), xff
+      local rows, pdps_per_cdp, xff = a.row_count, a.pdps_per_cdp, a.min_coverage
+      return i, cf, tonumber(rows), tonumber(pdps_per_cdp), xff
    end
    return iter, self, -1
 end
@@ -259,7 +265,7 @@ function RRD:ref(t)
    local ret = {}
    if t < 0 then return ret end
    for i, cf, rows, window, xff in self:iarchives() do
-      local interval = window * self.fixed.pdp_step
+      local interval = window * self.fixed.seconds_per_pdp
       local offset = t / interval
       if offset < rows then
          local row = (tonumber(self.var.last_row[i]) - offset) % rows
@@ -277,111 +283,155 @@ end
 
 local function isnan(x) return x~=x end
 
+local function compute_diff(pdp, v, typ, dt, heartbeat_interval, lo, hi)
+   if v == nil then return 0/0, 0/0 end
+   local diff, rate = 0/0, 0/0
+   print(typ,dt,heartbeat_interval)
+   if typ == 'counter' then
+      local prev = pdp.last_reading.raw
+      if dt < heartbeat_interval and prev.is_known ~= 0 then
+         diff = tonumber(v - prev.counter)
+         rate = diff / dt
+      end
+      prev.is_known, prev.counter = 1, v
+   elseif typ == 'gauge' then
+      if dt < heartbeat_interval then diff, rate = v * dt, v end
+   else error('unexpected kind', typ) end
+   if rate < lo or rate > hi then return 0/0, 0/0 end
+   return diff, rate
+end
+
+local function update_pdp(pdp, diff, secs_per_pdp, pre, dt)
+   local dt_in_pdp = math.min(dt, secs_per_pdp - pre)
+   if isnan(diff) then
+      pdp.unknown_count = pdp.unknown_count + dt_in_pdp
+   elseif isnan(pdp.diff) then
+      pdp.diff = diff * dt_in_pdp / dt
+   else
+      pdp.diff = pdp.diff + diff * dt_in_pdp / dt
+   end
+end
+
+local function compute_pdp_value(pdp, secs_per_pdp, dt, heartbeat_interval)
+   -- This condition comes from upstream rrdtool.
+   if dt < heartbeat_interval and pdp.unknown_count < secs_per_pdp/2 then
+      return pdp.diff / tonumber(secs_per_pdp - pdp.unknown_count)
+   else
+      return 0/0
+   end
+end
+
+local function update_cdp(cdp, pdp_value, cf, pdp_pre, pdp_advance,
+                          pdps_per_cdp, xff)
+   local pdp_advance_in_cdp = math.min(pdp_advance, pdps_per_cdp - pdp_pre)
+   -- Update the CDP that was being filled up, then fill any
+   -- intermediate slots with 
+   if isnan(pdp_value) then
+      cdp.unknown_count = cdp.unknown_count + pdp_advance_in_cdp
+   end
+   if cdp.unknown_count > pdps_per_cdp * xff then
+      cdp.value = 0/0
+   elseif cf == 'average' then
+      if not isnan(pdp_value) then
+         if isnan(cdp.value) then cdp.value = 0 end
+         cdp.value = cdp.value + pdp_value * pdp_advance_in_cdp
+      end
+   elseif cf == 'maximum' then
+      if isnan(cdp.value) then cdp.value = pdp_value
+      elseif isnan(pdp_value) then -- pass
+      else cdp.value = math.max(cdp.value, pdp_value) end
+   elseif cf == 'minimum' then
+      if isnan(cdp.value) then cdp.value = pdp_value
+      elseif isnan(pdp_value) then -- pass
+      else cdp.value = math.min(cdp.value, pdp_value) end
+   elseif cf == 'last' then
+      cdp.value = pdp_value
+   else error('bad cf', cf) end
+end
+
+local function compute_cdp_value(cdp, cf, pdps_per_cdp)
+   if cf == 'average' then
+      return cdp.value / tonumber(pdps_per_cdp - cdp.unknown_count)
+   end
+   return cdp.value
+end
+
+local function reset_cdp(cdp, pdp_post, pdp_value)
+   if isnan(pdp_value) or pdp_post == 0 then
+      cdp.value = 0/0
+      cdp.unknown_count = pdp_post
+   elseif cf == 'average' then
+      cdp.value = pdp_value * pdp_post
+      cdp.unknown_count = 0
+   else
+      cdp.value = pdp_value
+      cdp.unknown_count = 0
+   end
+end
+
 -- Add a reading, consisting of a map from source names to values.
 function RRD:add(values, t)
-   if t == nil then t = engine.now() end
-   local last = self:last_update()
-   local dt = t - last
-   local step = tonumber(self.fixed.pdp_step)
-   local pre = last % step
-   local steps = math.floor((dt + pre) / step)
-   assert(dt > 0)
+   if t == nil then t = now() end
+   local t0 = self:last_update()
+   local dt = t - t0; assert(dt >= 0)
+   local sec_per_pdp = self.seconds_per_pdp
+   local dt_pre = partial_pdp_time(t0, sec_per_pdp)
+   local dt_post = partial_pdp_time(t, sec_per_pdp)
+   local pdp_advance = math.floor((dt + dt_pre) / sec_per_pdp)
    for i, name, typ, h, lo, hi in self:isources() do
       local pdp = self.var.pdp_prep[i]
-      local prev = pdp.last_reading.raw
-      local v = values[name]
-      local diff, rate = 0/0, 0/0
-      if v then
-         if typ == 'counter' then
-            if dt < h and prev.is_known then
-               diff = tonumber(v - prev.as_uint64)
-               rate = diff / dt
-            end
-            prev.is_known, prev.as_uint64 = true, v
-         elseif typ = 'gauge' then
-            if dt < h then
-               diff, rate = v * dt, v
-            end
-         else
-            error('unexpected kind', typ)
-         end
-      end
-      if rate < lo or rate > hi then -- Will be false for NaN limits.
-         diff, rate = 0/0, 0/0
-      end
+      print(i,name,typ,h,lo,hi,values[name],pdp.diff,pdp.last_reading.raw.is_known,pdp.last_reading.raw.counter)
+      local diff, rate = compute_diff(pdp, values[name], typ, dt, h, lo, hi)
+      print(diff,rate,pdp.last_reading.raw.is_known,pdp.last_reading.raw.counter)
+      update_pdp(pdp, diff, sec_per_pdp, dt_pre, dt)
 
-      local tail = step - pre
-      local in_last_pdp = math.min(tail/dt, 1)
-      if isnan(diff) then
-         pdp.unknown_count = pdp.unknown_count + math.min(dt, tail)
-      elseif isnan(pdp.value) then
-         pdp.value = diff * in_last_pdp
-      else
-         pdp.value = pdp.value + diff * in_last_pdp
-      end
-
-         -- Roll over PDP into CDPs.
-      if steps > 0 then
-         local mrhb = self.fixed.min_heartbeat_period
-         local tmp = 0/0
-         if dt < mrhb and pdp.unknown_count < step/2 then
-            tmp = pdp.value / (step - pdp.unknown_count)
-         end
-         -- fixme: commit value!!
+      -- If we made a new PDP, use it to update corresponding CDPs.
+      if pdp_advance > 0 then
+         local pdp_value = compute_pdp_value(pdp, sec_per_pdp, dt, h)
          
-         for j, cf, rows, cdp_step, xff in self:iarchives() do
+         for j, cf, rows, pdps_per_cdp, xff in self:iarchives() do
             local cdp = self.var.cdp_prep[j*self.fixed.source_count+i]
-            local interval = cdp_step * step
-            local offset = t / interval
-            local archive = self.archives[j]
-            local start_pdp_offset = math.floor((last % interval) / step)
-            local cdp_steps = math.floor((start_pdp_offset + steps) / cdp_step)
-            -- min with row count
-            local steps_in_cdp = math.min(steps, cdp_step - start_pdp_offset)
-            local primary, secondary = 0/0, 0/0
-            if isnan(tmp) then
-               cdp.unknown_count = cdp.unknown_count + steps_in_cdp
-            else
-               -- compute vs initialize??
-               cdp.value = calculate_cdp_value(cdp, tmp, ....)
-               -- fixme for steps of 0 or not 0
-               primary = initialize_cdp_val()
-               secondary = tmp
-            else
-               if isnan(
-               -- update primary and secondary values, write to cdp array
+            local pdp_pre = partial_cdp_pdps(t0, sec_per_pdp, pdps_per_cdp)
+            update_cdp(cdp, pdp_value, cf, pdp_pre, pdp_advance,
+                       pdps_per_cdp, xff)
 
-               -- 
-            -- update cdp prep
-        if (update_cdp_prep
-            (rrd, elapsed_pdp_st, start_pdp_offset, rra_step_cnt, rra_idx,
-             pdp_temp, *last_seasonal_coef, *seasonal_coef,
-             current_cf) == -1) {
-            return -1;
-        }
-        end
-
-         -- intervening pdps are unknown
-         local post = t % step
-         if isnan(diff) then
-            pdp.unknown_count = pdp.unknown_count + post
-         else
-            pdp.value = diff * post/dt
+            local cdp_advance = math.floor((pdp_pre+pdp_advance)/pdps_per_cdp)
+            if cdp_advance > 0 then
+               local value = compute_cdp_value(cdp, cf, pdps_per_cdp)
+               local archive, row = self.archives[j], self.var.current_row[j]
+               for _=1,math.min(cdp_advance, rows+1) do
+                  row = (row + 1) % rows
+                  print('write cdp!!!!', j, row, i, value)
+                  archive.rows[row].values[i] = value
+                  -- FIXME: RRDtool fills in any subsequent CDPs with
+                  -- the last PDP.  Perhaps instead we should fill in
+                  -- with NaN.
+                  value = pdp_value
+               end
+               self.var.current_row[j] = row
+               local pdp_post = partial_cdp_pdps(t, sec_per_pdp, pdps_per_cdp)
+               reset_cdp(cdp, pdp_post, pdp_value)
+            end
          end
-      end
-         -- update cdp prep areas
-         -- update archives
+
+         if isnan(diff) then
+            pdp.diff, pdp.unknown_count = 0/0, dt_post
+         else
+            pdp.diff, pdp.unknown_count = diff * dt_post/dt, 0
+         end
       end
    end
-   -- update last_up
-   return ret
+   self.var.last_update.seconds = t
+   self.var.last_update.useconds = (t - math.floor(t)) * 1e6
 end
 
 function selftest()
    print('selftest: lib.rrd')
-   local empty = create_rrd({}, {}, 1)
-   assert(#empty.archives == 0)
-   print(empty:ref(0))
+   local rrd = create_rrd({{name='foo', type='counter'}},
+      {{consolidation_function='average', row_count=1024, period=10}}, 2)
+   for k,v in pairs(rrd:ref(0)) do print(k,v) end
+   local t = math.ceil(rrd:last_update()/20)*20
+   for i=0,40 do rrd:add({foo=42+i},t+0.75*i) end
    print('selftest: ok')
 end
 
