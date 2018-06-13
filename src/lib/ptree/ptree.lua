@@ -310,6 +310,18 @@ local function strip_prefix(a, b)
    assert(has_prefix(a, b))
    return a:sub(#b+1)
 end
+local function strip_suffix(a, b)
+   assert(has_suffix(a, b))
+   return a:sub(1,-#b)
+end
+
+function Manager:make_rrd(counter_name)
+   local name = strip_suffix(counter_name, ".counter")..'.rrd'
+   return rrd.create_shm(name, {
+      sources={{name='foo', type='counter'}},
+      archives={{cf='average', duration='1h', interval='10s'}},
+      base_interval='2s' })
+end
 
 function Manager:monitor_worker_counters(id)
    local worker = self.workers[id]
@@ -325,6 +337,7 @@ function Manager:monitor_worker_counters(id)
          if ev.kind == 'creat' then
             if not counters then
                counters = { aggregated=counter.create(name), active={},
+                            rrd={}, aggregated_rrd=self:make_rrd(name),
                             archived=ffi.new('uint64_t[1]') }
                self.counters[name] = counters
             end
